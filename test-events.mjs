@@ -98,5 +98,42 @@ const userMixed = (callId, content, text) => ({
   check('系统提醒：纯 reminder 被过滤', users.length === 1, `users=${users.length}`)
 }
 
+// 7. 重放不变量（token meter 同款校验）：任意消息流产出的序列必须 turn/step 严格闭合
+{
+  const streams = [
+    // claude 风格：连续 assistant + 后置结果
+    [userMsg('并行读'), assistantCall('a'), assistantCall('b'), userToolResult('a', 'A'), userToolResult('b', 'B')],
+    // 结果缺失（悬挂 call）：必须补合成结果收步
+    [userMsg('读文件'), assistantCall('x'), userMsg('下一个问题'), assistantText('好的')],
+    // zcode 风格：assistant 自带结果
+    [{ role: 'assistant', content: [{ type: 'tool-call', id: 'z1', name: 'read', arguments: '{}' }, { type: 'tool-result', toolCallId: 'z1', content: 'ok' }], model: 't' }],
+    // 混合：结果+文本同条 user，随后再来一轮工具调用
+    [userMsg('执行'), assistantCall('m1'), userMixed('m1', '结果', '顺带说一句'), assistantCall('m2'), userToolResult('m2')],
+  ]
+  let allBalanced = true
+  for (const stream of streams) {
+    const ev = toSessionEvents(stream)
+    let open = null
+    for (const e of ev) {
+      if (e.type === 'step/start') {
+        if (open) { allBalanced = false; console.log('  违规:', JSON.stringify(e)) }
+        open = e.data
+      } else if (e.type === 'step/end' || e.type === 'turn/end') {
+        open = null
+      }
+    }
+    if (open) { allBalanced = false; console.log('  尾部未闭合:', JSON.stringify(open)) }
+    // 每个 tool/call 都必须有同 step 的 tool/result
+    const callSteps = new Map(ev.filter(e => e.type === 'tool/call').map(e => [e.data.callId, e.data.step]))
+    for (const r of ev.filter(e => e.type === 'tool/result')) {
+      if (callSteps.get(r.data.message.source.callId) !== r.data.step) {
+        allBalanced = false
+        console.log('  result 与 call 不同 step:', r.data.message.source.callId)
+      }
+    }
+  }
+  check('重放不变量：turn/step 闭合且 call/result 同 step', allBalanced)
+}
+
 console.log(`\n结果: ${pass} 通过 / ${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

@@ -585,7 +585,7 @@ export function apply(ctx) {
     }, 3000)
   }
 
-  ctx.webServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api-import/list',
     handler: async (req, res) => {
@@ -601,8 +601,8 @@ export function apply(ctx) {
         res.end(JSON.stringify({ ok: false, error: e.message }))
       }
     },
-  })
-  ctx.webServer.register({
+  }), 'webserver /api-import/list')
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api-import/batch',
     handler: async (req, res) => {
@@ -634,8 +634,8 @@ export function apply(ctx) {
         res.end(JSON.stringify({ ok: false, error: e.message }))
       }
     },
-  })
-  ctx.webServer.register({
+  }), 'webserver /api-import/batch')
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api-import',
     handler: async (req, res) => {
@@ -655,15 +655,15 @@ export function apply(ctx) {
         res.end(JSON.stringify({ ok: false, error: e.message }))
       }
     },
-  })
+  }), 'webserver /api-import')
 
-  ctx.commands.register({
+  ctx.effect(() => ctx.commands.register({
     name: 'import',
     description: '导入其他工具的聊天记录（claude-code / codex / reasonix / zcode；传目录可批量）',
     input: { hint: '<claude-code|codex|reasonix|zcode> <文件或目录路径>' },
     handler: async (invocation) => {
       const { rawInput } = invocation
-    const lines = buf.toString('utf8', 0, n).split(/\r?\n/).filter((l) => l.trim())
+      const [tool, ...rest] = String(rawInput ?? '').trim().split(/\s+/)
       const path = rest.join(' ').trim()
       if (!tool || !path) {
         return { kind: 'error', text: '用法：/import <claude-code|codex|reasonix|zcode> <文件或目录路径>' }
@@ -723,5 +723,5 @@ export function apply(ctx) {
         return { kind: 'error', text: `[session-import] 导入失败：${error.message}` }
       }
     },
-  })
+  }), 'command import')
 }

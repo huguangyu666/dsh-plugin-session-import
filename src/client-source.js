@@ -260,7 +260,7 @@ const React = require("react");
     const inject = ["slots", "locale"];
 
     function apply(ctx) {
-      ctx.effect(() =>
+      ctx.slots.inject("sidebar.footer.action", () =>
         ctx.slots.register(
           { name: "sidebar.footer.action", id: "session-import", order: 0, locale: "session-import" },
           ImportButton,
