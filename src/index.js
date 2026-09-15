@@ -494,20 +494,31 @@ function trimOversized(messages, budget = CONTEXT_BUDGET) {
   return { messages: result, trimmed: messages.length - result.length }
 }
 
-async function importOne(ctx, tool, path, agentOptions, hintCwd) {
+async function importOne(ctx, tool, path, agentOptions, hintCwd, hintTitle) {
   const parse = PARSERS[tool]
   if (!parse) throw new Error('未知工具: ' + tool)
-  const { messages: rawMessages, cwd: parsedCwd } = parse(path)
+  const { messages: rawMessages, cwd: parsedCwd, title: parsedTitle } = parse(path)
   // cwd 优先级：解析器结果 > 扫描提示（reasonix 桌面版 slug 解码）> 兜底
   const cwd = parsedCwd || hintCwd
   if (!rawMessages || rawMessages.length === 0) throw new Error('没有可导入的消息')
+
+  // 标题优先级：显式提示 hintTitle > 解析器 title > 扫描缓存 title > 文件提取 extractTitle > 首条用户消息
+  const cachedTitle = _scanCache[tool]?.sessions?.find((s) => s.path === path)?.title
+  let sessionTitle = hintTitle || parsedTitle || cachedTitle || (typeof path === 'string' && !path.startsWith('zcode://') ? extractTitle(path) : '') || ''
+  if (!sessionTitle && rawMessages?.length) {
+    const firstUser = rawMessages.find((m) => m.role === 'user')
+    if (firstUser) {
+      const text = firstUser.content?.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim()
+      if (text) sessionTitle = text.replace(/<[^>]+>/g, '').trim().slice(0, 60)
+    }
+  }
 
   // 动态预算：按默认模型的真实窗口计算；拿不到则用保守默认值
   const modelBudget = await resolveModelBudget(ctx)
   const budget = modelBudget?.budget ?? CONTEXT_BUDGET
   const { messages, trimmed } = trimOversized(rawMessages, budget)
   if (trimmed > 0) console.log(`[session-import] 会话超长，截断 ${trimmed} 条历史消息（保留 ${messages.length} 条，预算 ${budget}）`)
-  const events = toSessionEvents(messages)
+  const events = toSessionEvents(messages, sessionTitle)
   const sessionId = `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
   // 先创建会话（meta.cwd 写入 header），再绑定工作区。
@@ -559,7 +570,7 @@ async function importOne(ctx, tool, path, agentOptions, hintCwd) {
       try { await ws.attachSession(sessionId) } catch (e) { console.error('[session-import] attachSession 失败:', e.message) }
     } catch (e) { console.error('[session-import] 工作区注册失败:', e.message) }
   }
-  return { sessionId, messages, events, cwd, workspaceId, trimmed }
+  return { sessionId, messages, events, cwd, workspaceId, trimmed, title: sessionTitle }
 }
 
 /** 读取请求 body 的 JSON */
@@ -616,13 +627,14 @@ export function apply(ctx) {
         }
         const imported = []
         const failed = []
-        // 扫描缓存的 cwd 提示（reasonix 桌面版 slug 解码出的真实路径）
+        // 扫描缓存的 cwd 与 title 提示（reasonix 桌面版 slug 解码出的真实路径 / sqlite 标题）
         const cached = _scanCache[tool]?.sessions ?? []
         const cwdHint = new Map(cached.filter((s) => s.cwd).map((s) => [s.path, s.cwd]))
+        const titleHint = new Map(cached.filter((s) => s.title).map((s) => [s.path, s.title]))
         for (const path of paths) {
           try {
-            const r = await importOne(ctx, tool, path, {}, cwdHint.get(path))
-            imported.push({ path, sessionId: r.sessionId, messages: r.messages.length, events: r.events.length, cwd: r.cwd, trimmed: r.trimmed })
+            const r = await importOne(ctx, tool, path, {}, cwdHint.get(path), titleHint.get(path))
+            imported.push({ path, sessionId: r.sessionId, messages: r.messages.length, events: r.events.length, cwd: r.cwd, trimmed: r.trimmed, title: r.title })
           } catch (e) {
             failed.push({ path, error: e.message })
           }
@@ -641,15 +653,15 @@ export function apply(ctx) {
     handler: async (req, res) => {
       try {
         const body = await readBody(req)
-        const { tool, path } = body ?? {}
+        const { tool, path, title } = body ?? {}
         if (!tool || !path) {
           res.writeHead(400, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: '缺少 tool 或 path' }))
           return
         }
-        const r = await importOne(ctx, tool, path, {})
+        const r = await importOne(ctx, tool, path, {}, undefined, title)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, sessionId: r.sessionId, messages: r.messages.length, events: r.events.length, cwd: r.cwd }))
+        res.end(JSON.stringify({ ok: true, sessionId: r.sessionId, messages: r.messages.length, events: r.events.length, cwd: r.cwd, title: r.title }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: false, error: e.message }))
@@ -715,7 +727,7 @@ export function apply(ctx) {
         const r = await importOne(ctx, tool, path, agentOptions)
         const users = r.messages.filter((m) => m.role === 'user').length
         const assistants = r.messages.filter((m) => m.role === 'assistant').length
-        const text = `[session-import] ${tool}：导入完成 → 新会话 ${r.sessionId}\n` +
+        const text = `[session-import] ${tool}：导入完成 → 新会话 ${r.sessionId}${r.title ? '（' + r.title + '）' : ''}\n` +
           `（${r.messages.length} 条消息：用户 ${users} / 助手 ${assistants}；${r.events.length} 个事件；模型 ${currentOptions.model}）` +
           (r.cwd ? `\n工作区：${r.cwd}` : '')
         return { kind: 'success', text }

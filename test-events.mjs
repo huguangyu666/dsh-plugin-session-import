@@ -135,5 +135,38 @@ const userMixed = (callId, content, text) => ({
   check('重放不变量：turn/step 闭合且 call/result 同 step', allBalanced)
 }
 
+// 8. DSH 0.1.5 兼容：assistant/message 必须具备合法 settlement 字段（含 stream: []）
+{
+  const ev = toSessionEvents([userMsg('问题'), assistantText('答复')])
+  const assts = ev.filter(e => e.type === 'assistant/message')
+  check('settlement：含 assistant/message', assts.length === 1)
+  let validShape = true
+  for (const a of assts) {
+    const d = a.data
+    if (typeof d.turn !== 'number' || d.turn < 0 || typeof d.step !== 'number' || d.step < 0 || !Array.isArray(d.stream)) {
+      validShape = false
+      console.log('  settlement 字段非法:', JSON.stringify(d))
+    }
+  }
+  check('settlement：具备非负 turn/step 与 stream 数组', validShape)
+}
+
+// 9. 会话标题：首位 session/title 事件生成与契约校验
+{
+  const title = '测试项目会话'
+  const evWithTitle = toSessionEvents([userMsg('你好'), assistantText('世界')], title)
+  check('会话标题：首事件为 session/title', evWithTitle[0]?.type === 'session/title')
+  check('会话标题：seq 从 0 连续单调递增', evWithTitle.every((e, idx) => e.seq === idx))
+  check('会话标题：title 字段匹配', evWithTitle[0]?.data?.title === title)
+  check('会话标题：source.kind === user 且 messageSeqs 为空（满足不变式）',
+    evWithTitle[0]?.data?.source?.kind === 'user' &&
+    Array.isArray(evWithTitle[0]?.data?.messageSeqs) &&
+    evWithTitle[0]?.data?.messageSeqs.length === 0
+  )
+
+  const evNoTitle = toSessionEvents([userMsg('无标题'), assistantText('好的')])
+  check('会话标题：无标题时不生成 session/title', !evNoTitle.some(e => e.type === 'session/title'))
+}
+
 console.log(`\n结果: ${pass} 通过 / ${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

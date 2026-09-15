@@ -101,9 +101,16 @@ function finalizeStep() {
  * 内一起输出；结果未到齐前 step 保持打开；强制移动边界（新用户文本/换轮/结尾）
  * 时为悬挂 call 补合成结果再收步。
  */
-export function toSessionEvents(messages) {
+export function toSessionEvents(messages, sessionTitle) {
   reset()
   const events = []
+  if (sessionTitle && typeof sessionTitle === 'string' && sessionTitle.trim()) {
+    events.push(push('session/title', {
+      title: sessionTitle.trim(),
+      messageSeqs: [],
+      source: { kind: 'user' },
+    }))
+  }
   /** pending assistant 载体：{ textBlocks, calls, model, usage } */
   let pending = null
 
@@ -120,6 +127,7 @@ export function toSessionEvents(messages) {
     if (content.length > 0) {
       events.push(push('assistant/message', {
         turn, step,
+        stream: [],
         message: {
           id: `import-assistant-${seq}`,
           role: 'assistant',

@@ -103,7 +103,7 @@ function parseFromDb(sessionId) {
       if (role === 'user' && text.includes('<system-reminder>')) continue // 过滤系统注入提醒
       messages.push({ role, content: parts, model: msg.modelID })
     }
-    return { messages, cwd: sess.directory }
+    return { messages, cwd: sess.directory, title: sess.title }
   } finally {
     try { db.close() } catch { /* 忽略 */ }
   }
@@ -113,8 +113,13 @@ function parseFromDb(sessionId) {
 function parseFromFile(transcriptPath) {
   const metaPath = transcriptPath.replace(/transcript\.jsonl$/, 'metadata.json')
   let cwd
+  let title
   if (existsSync(metaPath)) {
-    try { cwd = JSON.parse(readFileSync(metaPath, 'utf8')).cwd } catch { /* 忽略 */ }
+    try {
+      const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
+      cwd = meta.cwd
+      title = meta.title
+    } catch { /* 忽略 */ }
   }
 
   const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/).filter((l) => l.trim())
@@ -156,7 +161,7 @@ function parseFromFile(transcriptPath) {
       })
     }
   }
-  return { messages, cwd }
+  return { messages, cwd, title }
 }
 
 export function parseZcode(path) {
