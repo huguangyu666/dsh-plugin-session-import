@@ -78,13 +78,10 @@ function finalizeStep() {
       turn, step,
       message: {
         id: `import-tool-${seq}`,
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: callId,
-          isError: true,
-          content: [{ type: 'text', text: 'The tool call was interrupted in the source transcript and no result was recorded. Retry it if it is still needed.' }],
-        }],
+        role: 'tool',
+        toolCallId: callId,
+        isError: true,
+        content: [{ type: 'text', text: 'The tool call was interrupted in the source transcript and no result was recorded. Retry it if it is still needed.' }],
         source: { kind: 'tool', callId },
       },
     }, { surfaceOp: 'append' }))
@@ -168,8 +165,10 @@ export function toSessionEvents(messages, sessionTitle) {
       turn, step,
       message: {
         id: `import-tool-${seq}`,
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: block.toolCallId, content: block.content, isError: block.isError === true }],
+        role: 'tool',
+        toolCallId: block.toolCallId,
+        content: Array.isArray(block.content) ? block.content : [{ type: 'text', text: typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '') }],
+        ...(block.isError === true ? { isError: true } : {}),
         source: { kind: 'tool', callId: block.toolCallId },
       },
     }, { surfaceOp: 'append' }))
@@ -222,6 +221,7 @@ export function toSessionEvents(messages, sessionTitle) {
         // 若该 user 消息还带文本（纯文本 + tool-result 混合），追加 user/message
         const realText = textBlocks.filter((b) => b.type === 'text' && b.text.trim())
         if (realText.length > 0) {
+          if (stepOpen) events.push(...finalizeStep())
           if (!turnOpen) events.push(openTurn())
           if (!stepOpen) events.push(openStep())
           events.push(push('user/message', {
@@ -254,5 +254,36 @@ export function toSessionEvents(messages, sessionTitle) {
   flushPending()
   if (stepOpen) events.push(...finalizeStep())
   events.push(...closeTurn())
+  validateLifecycle(events)
   return events
+}
+
+/** Reject incomplete tool and step lifecycles before the seed is persisted. */
+function validateLifecycle(events) {
+  let activeTurn = null
+  let activeStep = null
+  const calls = new Set()
+  for (const event of events) {
+    const { type, data } = event
+    if (type === 'turn/start') {
+      if (activeTurn !== null) throw new Error('导入会话的 turn 未闭合')
+      activeTurn = data.turn
+    } else if (type === 'step/start') {
+      if (activeTurn !== data.turn || activeStep !== null) throw new Error('导入会话的 step 顺序无效')
+      activeStep = data.step
+    } else if (type === 'tool/call') {
+      if (activeTurn !== data.turn || activeStep !== data.step || calls.has(data.callId)) throw new Error('导入会话的工具调用无效')
+      calls.add(data.callId)
+    } else if (type === 'tool/result') {
+      const callId = data.message?.toolCallId
+      if (activeTurn !== data.turn || activeStep !== data.step || !calls.delete(callId)) throw new Error('导入会话的工具结果没有对应调用')
+    } else if (type === 'step/end') {
+      if (activeTurn !== data.turn || activeStep !== data.step || calls.size) throw new Error('导入会话的 step 或工具调用未闭合')
+      activeStep = null
+    } else if (type === 'turn/end') {
+      if (activeTurn !== data.turn || activeStep !== null) throw new Error('导入会话的 turn 或 step 未闭合')
+      activeTurn = null
+    }
+  }
+  if (activeTurn !== null || activeStep !== null || calls.size) throw new Error('导入会话的事件未闭合')
 }

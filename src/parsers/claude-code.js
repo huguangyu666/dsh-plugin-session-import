@@ -5,6 +5,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { decodeSlugPath } from '../path-decoding.js'
 
 /** 把 claude 的 content block 转成 dsh 风格 block（text/image/tool-call/tool-result） */
 function mapBlock(block) {
@@ -52,12 +54,12 @@ function loadCwdMap() {
   if (cwdMapCache) return cwdMapCache
   const map = {}
   try {
-    const cfg = JSON.parse(readFileSync(join(process.env.USERPROFILE || '', '.claude.json'), 'utf8'))
+    const cfg = JSON.parse(readFileSync(join(process.env.USERPROFILE || process.env.HOME || homedir(), '.claude.json'), 'utf8'))
     for (const realPath of Object.keys(cfg.projects ?? {})) {
-      // 真实路径的 basename（Harness-agent）→ 真实路径；中文项目名也直接建
-      const base = realPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
-      if (base) map[base] = realPath
       map[realPath] = realPath
+      for (const slug of new Set([realPath.replace(/[\\/._]/g, '-'), realPath.replace(/[^a-zA-Z0-9]/g, '-')])) {
+        map[slug] = slug in map && map[slug] !== realPath ? null : realPath
+      }
     }
   } catch { /* 无 .claude.json 则回退解码 */ }
   cwdMapCache = map
@@ -69,27 +71,23 @@ function decodeCwd(filePath) {
   const m = filePath.match(/projects[\\\/]([^\\\/]+)[\\\/]/)
   if (!m) return undefined
   const dir = m[1]
-  // 1. 优先查 .claude.json 权威映射（精确 + basename）
+  // 优先查 .claude.json 中的完整项目路径映射。
   const map = loadCwdMap()
   if (map[dir]) return map[dir]
-  // 2. 目录名的 basename（去掉 C--Users-www13- 前缀后的最后一段）
-  //    C--Users-www13-Documents-AAA----Harness-agent → Harness-agent
-  const lastSeg = dir.split('-').slice(-2).join('-')
-  if (map[lastSeg]) return map[lastSeg]
-  //    下划线变体（GS-Code ↔ GS_Code）
-  const underscore = lastSeg.replace(/-/g, '_')
-  if (map[underscore]) return map[underscore]
-  // 3. 回退：ASCII 路径解码（-- → :\，- → \）
-  return dir.replaceAll('--', ':\\').replaceAll('-', '\\')
+  // slug 无法唯一还原时只接受磁盘上存在的路径。
+  return decodeSlugPath(dir)
 }
 
 /** 解析一个 JSONL 文件，返回 { messages, cwd } */
 export function parseClaudeCode(filePath) {
   const lines = readFileSync(filePath, 'utf8').split(/\r?\n/).filter((l) => l.trim())
   const messages = []
+  let recordCwd
   for (const line of lines) {
     let record
     try { record = JSON.parse(line) } catch { continue }
+    if (record.isSidechain === true) continue
+    if (!recordCwd && typeof record.cwd === 'string' && record.cwd) recordCwd = record.cwd
     const type = record.type
     const msg = record.message
     if (!msg || typeof msg !== 'object') continue
@@ -113,7 +111,7 @@ export function parseClaudeCode(filePath) {
     }
     // system / mode / permission-mode 等元数据事件跳过
   }
-  return { messages: reorderToolPairs(messages), cwd: decodeCwd(filePath) }
+  return { messages: reorderToolPairs(messages), cwd: recordCwd || decodeCwd(filePath) }
 }
 
 /**

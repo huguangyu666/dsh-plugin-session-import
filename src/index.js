@@ -7,6 +7,9 @@
 import { existsSync, readdirSync, statSync, readFileSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { homedir } from 'node:os'
+import { decodeSlugPath } from './path-decoding.js'
+export { decodeSlugPath } from './path-decoding.js'
 import { parseClaudeCode } from './parsers/claude-code.js'
 import { parseCodex } from './parsers/codex.js'
 import { parseReasonix } from './parsers/reasonix.js'
@@ -27,7 +30,7 @@ const PARSERS = {
 
 /** 在 ~/.claude/projects 下按 cliSessionId 找消息 jsonl */
 function findJsonlBySessionId(cliSessionId) {
-  const root = join(process.env.USERPROFILE || '', '.claude', 'projects')
+  const root = join(process.env.USERPROFILE || process.env.HOME || homedir(), '.claude', 'projects')
   if (!existsSync(root)) return undefined
   let found
   const walk = (d) => {
@@ -36,6 +39,7 @@ function findJsonlBySessionId(cliSessionId) {
     try { entries = readdirSync(d) } catch { return }
     for (const entry of entries) {
       const full = join(d, entry)
+      if (isClaudeSubagent(full)) continue
       try {
         if (statSync(full).isDirectory()) walk(full)
         else if (full.endsWith('.jsonl') && full.includes(cliSessionId)) { found = full; return }
@@ -84,7 +88,7 @@ function extractTitle(path) {
     for (const line of lines) {
       try {
         const d = JSON.parse(line)
-        if (d.payload?.role === 'developer') continue
+        if (d.isSidechain === true || d.payload?.role === 'developer') continue
         // reasonix 桌面版：{type:'replace', messages:[{role, content}]} 事件格式
         if (Array.isArray(d.messages)) {
           const firstUser = d.messages.find((m) => (m.role === 'user' || m.role === 'human') && typeof m.content === 'string')
@@ -116,45 +120,9 @@ function extractTitle(path) {
   return ''
 }
 
-/**
- * reasonix 项目 slug → 真实路径（贪心解码）。
- * slug 是路径的 `-` 编码（`c--users` → `c:\users`），但目录名本身的 `-`
- * 无法与分隔符区分，因此用磁盘存在性贪心匹配：
- *  1. 剩余所有段整段作为目录名（处理含 `-` 的目录名如 global-workspace）
- *  2. 当前单段
- *  3. 合并后续段（最多 3 段）
- * 返回规范化的绝对路径，或 undefined。
- */
-export function decodeSlugPath(slug) {
-  try {
-    const bs = '\\'
-    let rest = slug
-    let path = ''
-    if (rest.startsWith('c--')) { path = 'c:' + bs; rest = rest.slice(3) }
-    else if (rest.startsWith('d--')) { path = 'd:' + bs; rest = rest.slice(3) }
-    const parts = rest.split('-')
-    let i = 0
-    while (i < parts.length) {
-      const part = parts[i]
-      if (!part) { i++; continue }
-      // 1. 剩余所有段整段作为目录名
-      const remaining = parts.slice(i).join('-')
-      if (existsSync(path + remaining)) { path += remaining + bs; break }
-      // 2. 当前单段
-      if (existsSync(path + part)) { path += part + bs; i++; continue }
-      // 3. 合并后续段（最多 3 段）
-      let merged = part
-      let j = i + 1
-      let found = false
-      while (j < parts.length && j - i <= 3) {
-        merged += '-' + parts[j]
-        if (existsSync(path + merged)) { path += merged + bs; i = j + 1; found = true; break }
-        j++
-      }
-      if (!found) return undefined // 段在文件系统不存在 → 解码失败，不拼垃圾路径
-    }
-    return path.replace(/[\\/]+$/, '') || undefined
-  } catch { return undefined }
+/** Claude 子 agent 转录不是独立的主会话。 */
+function isClaudeSubagent(path) {
+  return /(?:^|[\\/])subagents(?:[\\/]|$)/i.test(path) || /(?:^|[\\/])agent-[^\\/]+\.jsonl$/i.test(path)
 }
 
 /** 全量扫描（缓存用）：返回排序后的条目列表 */
@@ -177,6 +145,7 @@ function scanAllSessions(tool) {
     try { entries = readdirSync(d) } catch { return }
     for (const entry of entries) {
       const full = join(d, entry)
+      if (tool === 'claude-code' && isClaudeSubagent(full)) continue
       try {
         if (statSync(full).isDirectory()) walk(full)
         else if (full.endsWith('.jsonl') && !full.endsWith('.meta.json')) files.push(full)
@@ -531,6 +500,9 @@ async function importOne(ctx, tool, path, agentOptions, hintCwd, hintTitle) {
   const homeDir = (process.env.USERPROFILE || process.env.HOME || '').replace(/[\\/]+$/, '')
   const isHome = (p) => homeDir && p && p.replace(/[\\/]+$/, '').toLowerCase() === homeDir.toLowerCase()
   let sessionCwd = cwd && existsSync(cwd) && !isHome(cwd) ? cwd : undefined
+  if (!sessionCwd && (tool === 'claude-code' || tool === 'claude')) {
+    throw new Error('无法确定 Claude 会话的有效工作区，请先恢复原项目目录')
+  }
   if (!sessionCwd) {
     // 回退：源文件目录（reasonix 旧 CLI 会话等无项目 cwd 的情况）；
     // 但源文件目录也是主目录时（~/.reasonix/sessions），用 reasonix 的全局 workspace 目录
@@ -698,6 +670,7 @@ export function apply(ctx) {
           const walkDir = (d) => {
             for (const entry of readdirSync(d)) {
               const full = join(d, entry)
+              if ((tool === 'claude-code' || tool === 'claude') && isClaudeSubagent(full)) continue
               try {
                 if (statSync(full).isDirectory()) walkDir(full)
                 else if (full.endsWith('.jsonl') && !full.endsWith('.meta.json')) all.push(full)
