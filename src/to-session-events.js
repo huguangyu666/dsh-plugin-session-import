@@ -108,6 +108,23 @@ export function toSessionEvents(messages, sessionTitle) {
       source: { kind: 'user' },
     }))
   }
+  let surfaceHeadReserved = false
+  const startStep = () => {
+    const started = [openStep()]
+    if (!surfaceHeadReserved) {
+      started.push(push('system/message', {
+        turn, step,
+        message: {
+          id: `import-system-${seq}`,
+          role: 'system',
+          content: [],
+          source: { kind: 'system-prompt' },
+        },
+      }, { surfaceOp: 'append' }))
+      surfaceHeadReserved = true
+    }
+    return started
+  }
   /** pending assistant 载体：{ textBlocks, calls, model, usage } */
   let pending = null
 
@@ -119,7 +136,7 @@ export function toSessionEvents(messages, sessionTitle) {
     if (!pending) return
     if (stepOpen) events.push(...finalizeStep())
     if (!turnOpen) events.push(openTurn())
-    events.push(openStep())
+    events.push(...startStep())
     const content = [...pending.textBlocks, ...pending.calls]
     if (content.length > 0) {
       events.push(push('assistant/message', {
@@ -160,7 +177,7 @@ export function toSessionEvents(messages, sessionTitle) {
   /** 输出一个 tool/result（同 step）；当前 step 的 call 全部有结果后自动收步。 */
   const emitToolResult = (block) => {
     if (!turnOpen) events.push(openTurn())
-    if (!stepOpen) events.push(openStep())
+    if (!stepOpen) events.push(...startStep())
     events.push(push('tool/result', {
       turn, step,
       message: {
@@ -223,7 +240,7 @@ export function toSessionEvents(messages, sessionTitle) {
         if (realText.length > 0) {
           if (stepOpen) events.push(...finalizeStep())
           if (!turnOpen) events.push(openTurn())
-          if (!stepOpen) events.push(openStep())
+          if (!stepOpen) events.push(...startStep())
           events.push(push('user/message', {
             id: `import-user-${seq}`,
             role: 'user',
@@ -240,7 +257,7 @@ export function toSessionEvents(messages, sessionTitle) {
       outstanding.clear() // 跨 turn，旧 call 不再可匹配
       const text = textBlocks.map((b) => b.text ?? '').join('')
       if (text.includes('<system-reminder>') && !text.replace(/<[^>]+>/g, '').trim()) continue // 过滤纯系统注入
-      events.push(...closeTurn(), openTurn(), openStep())
+      events.push(...closeTurn(), openTurn(), ...startStep())
       events.push(push('user/message', {
         id: `import-user-${seq}`,
         role: 'user',
@@ -253,6 +270,10 @@ export function toSessionEvents(messages, sessionTitle) {
   // 结尾：flush 未闭合的 assistant 载体并收尾所有边界（dangling tool-call 兜底，保证 seed 完整）
   flushPending()
   if (stepOpen) events.push(...finalizeStep())
+  if (!surfaceHeadReserved) {
+    if (!turnOpen) events.push(openTurn())
+    events.push(...startStep(), ...closeStep())
+  }
   events.push(...closeTurn())
   validateLifecycle(events)
   return events
@@ -263,7 +284,12 @@ function validateLifecycle(events) {
   let activeTurn = null
   let activeStep = null
   const calls = new Set()
+  let firstSurfaceSeen = false
   for (const event of events) {
+    if (event.surfaceOp === 'append' && !firstSurfaceSeen) {
+      if (event.type !== 'system/message') throw new Error('导入会话缺少系统提示词头')
+      firstSurfaceSeen = true
+    }
     const { type, data } = event
     if (type === 'turn/start') {
       if (activeTurn !== null) throw new Error('导入会话的 turn 未闭合')
